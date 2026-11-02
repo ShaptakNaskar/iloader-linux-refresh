@@ -1,0 +1,13 @@
+[Unit]
+Description=Renew selected iPhone app profiles before their seven-day expiry
+ConditionPathExists=%h/.local/share/altserver-refresh/account-profile.json
+ConditionPathExists=%h/.local/share/altserver-refresh/rp-pairing.plist
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/refresh-apps
+UMask=0077
+RuntimeDirectory=altserver-refresh
+RuntimeDirectoryMode=0700
+TimeoutStartSec=5min
+NoNewPrivileges=true
