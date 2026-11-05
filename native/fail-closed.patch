@@ -25,10 +25,50 @@ index d7c54e2..7d80d83 100644
  description = "AltServer for iOS 17+ that runs on your home server (Docker): renews and installs sideloaded iPhone apps over Wi-Fi, no computer or VPN"
  license = "MIT"
 diff --git a/src/main.rs b/src/main.rs
-index 38dbbb0..714b5b5 100644
+index 38dbbb0..db591bf 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -323,6 +323,12 @@ async fn cmd_apps() -> Result<(), String> {
+@@ -221,6 +221,39 @@ fn print_profile(p: &profile::PhoneProfile) {
+     println!("{}", profile_line(p));
+ }
+ 
++fn inventory_bundles(
++    profiles: &[profile::PhoneProfile],
++    team: &str,
++    inventory: Result<std::collections::HashSet<String>, String>,
++) -> Result<Vec<String>, String> {
++    let installed = require_installed_apps(inventory)?;
++    let mine = profile::latest_by_bundle(profiles.iter().filter(|p| p.team_id.as_deref() == Some(team)));
++    let bundles: Vec<&str> = mine.iter().filter_map(|p| p.bundle_id.as_deref()).collect();
++    let mut hosts = std::collections::BTreeSet::new();
++    for bundle in &bundles {
++        let root = profile::group_root(bundle, &bundles, team);
++        if installed.contains(root) || installed.contains(profile::profile_app_id(root, team)) {
++            hosts.insert(root.to_string());
++        }
++    }
++    Ok(hosts.into_iter().collect())
++}
++
++async fn cmd_inventory(addr: Option<SocketAddr>) -> Result<(), String> {
++    let account = apple::read_account(Path::new(".")).ok_or("Missing account metadata.")?;
++    let team = account.team_id.ok_or("Missing Apple developer team ID.")?;
++    let mut link = open_phone(Path::new("."), addr, &mut |s| eprintln!("{s}")).await?;
++    let profiles = phone_profiles(&mut link).await?;
++    let installed = phone::with_timeout(
++        "Installed app lookup",
++        std::time::Duration::from_secs(30),
++        link.installed_app_ids(),
++    ).await;
++    let bundles = inventory_bundles(&profiles, &team, installed)?;
++    println!("ILR_INVENTORY {}", serde_json::json!({"version": 1, "team_id": team, "bundles": bundles}));
++    Ok(())
++}
++
+ async fn cmd_phone(addr: Option<SocketAddr>) -> Result<(), String> {
+     let mut link = open_phone(Path::new("."), addr, &mut |s| println!("{s}")).await?;
+     let profiles = phone_profiles(&mut link).await?;
+@@ -323,6 +356,12 @@ async fn cmd_apps() -> Result<(), String> {
      Ok(())
  }
  
@@ -41,7 +81,7 @@ index 38dbbb0..714b5b5 100644
  async fn cmd_renew(
      dir: &Path,
      addr: Option<SocketAddr>,
-@@ -384,31 +390,15 @@ async fn cmd_renew(
+@@ -384,31 +423,15 @@ async fn cmd_renew(
          result
      };
  
@@ -78,7 +118,7 @@ index 38dbbb0..714b5b5 100644
      } else {
          None
      };
-@@ -449,7 +439,7 @@ async fn cmd_renew(
+@@ -449,7 +472,7 @@ async fn cmd_renew(
          }
          let days = p.days_left().unwrap_or(-1);
          let group_left = *group_days.get(root).unwrap_or(&days);
@@ -87,12 +127,47 @@ index 38dbbb0..714b5b5 100644
              say(&format!(
                  "   {bundle}: expires in {days} days, no renewal needed"
              ));
-@@ -1125,7 +1115,28 @@ async fn run() -> Result<(), String> {
+@@ -855,6 +878,7 @@ async fn run() -> Result<(), String> {
+             Ok(())
+         }
+         "phone" => cmd_phone(phone_addr(opt("--phone"))?).await,
++        "inventory" => cmd_inventory(phone_addr(opt("--phone"))?).await,
+         "pair-usb" => {
+             let out = args.first().cloned().unwrap_or_else(|| PAIRING_FILE.into());
+             phone::pair_usb(&out).await?;
+@@ -1125,7 +1149,55 @@ async fn run() -> Result<(), String> {
  
  #[cfg(test)]
  mod cli_tests {
 -    use super::save_password_confirmed;
-+    use super::{require_installed_apps, save_password_confirmed};
++    use super::{inventory_bundles, require_installed_apps, save_password_confirmed};
++
++    fn inventory_profile(bundle: &str, team: &str) -> super::profile::PhoneProfile {
++        super::profile::PhoneProfile {
++            uuid: bundle.to_string(), name: bundle.to_string(), team_id: Some(team.to_string()),
++            bundle_id: Some(bundle.to_string()), expires: None,
++        }
++    }
++
++    #[test]
++    fn discovery_includes_new_apps_but_not_removed_apps_other_teams_or_extensions() {
++        let team = "TEAM123456";
++        let profiles = vec![
++            inventory_profile("com.example.first.TEAM123456", team),
++            inventory_profile("com.example.second.TEAM123456", team),
++            inventory_profile("com.example.third.TEAM123456", team),
++            inventory_profile("com.example.third.TEAM123456.widget", team),
++            inventory_profile("com.example.removed.TEAM123456", team),
++            inventory_profile("com.example.foreign.OTHER12345", "OTHER12345"),
++        ];
++        let installed = ["com.example.first.TEAM123456", "com.example.second.TEAM123456",
++            "com.example.third.TEAM123456", "com.example.foreign.OTHER12345"]
++            .into_iter().map(str::to_string).collect();
++        let hosts = inventory_bundles(&profiles, team, Ok(installed)).unwrap();
++        assert_eq!(hosts, vec!["com.example.first.TEAM123456", "com.example.second.TEAM123456", "com.example.third.TEAM123456"]);
++        assert!(inventory_bundles(&profiles, team, Ok(Default::default())).unwrap().is_empty());
++        assert!(inventory_bundles(&profiles, team, Err("phone locked".into())).is_err());
++    }
 +
 +    #[test]
 +    fn failed_inventory_never_authorizes_renewal() {
