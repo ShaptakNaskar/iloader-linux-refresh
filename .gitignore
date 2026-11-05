@@ -18,3 +18,4 @@ state/
 *.lock
 *.tar.gz
 .cache/
+dist/

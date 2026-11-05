@@ -1,0 +1,119 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 8653619..7a7c45b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -75,7 +75,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "altkeeper"
+-version = "0.5.6"
++version = "0.5.6-ilr.1"
+ dependencies = [
+  "axum",
+  "base64 0.21.7",
+diff --git a/Cargo.toml b/Cargo.toml
+index d7c54e2..7d80d83 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,7 +1,7 @@
+ [package]
+ default-run = "altkeeper"
+ name = "altkeeper"
+-version = "0.5.6"
++version = "0.5.6-ilr.1"
+ edition = "2021"
+ description = "AltServer for iOS 17+ that runs on your home server (Docker): renews and installs sideloaded iPhone apps over Wi-Fi, no computer or VPN"
+ license = "MIT"
+diff --git a/src/main.rs b/src/main.rs
+index 38dbbb0..714b5b5 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -323,6 +323,12 @@ async fn cmd_apps() -> Result<(), String> {
+     Ok(())
+ }
+ 
++fn require_installed_apps(
++    result: Result<std::collections::HashSet<String>, String>,
++) -> Result<std::collections::HashSet<String>, String> {
++    result.map_err(|err| format!("Installed app lookup failed; no profiles were renewed: {err}"))
++}
++
+ async fn cmd_renew(
+     dir: &Path,
+     addr: Option<SocketAddr>,
+@@ -384,31 +390,15 @@ async fn cmd_renew(
+         result
+     };
+ 
+-    // When the installed-app lookup fails, explicitly fall back to renewing ALL
+-    // known team profiles. This is intentional and must be visible in logs.
+-    let mut fallback_renew_all = false;
++    // An unreadable inventory must never authorize renewal of unknown or absent apps.
+     let installed = if installed_only {
+-        match phone::with_timeout(
++        let apps = require_installed_apps(phone::with_timeout(
+             "Installed app lookup",
+             std::time::Duration::from_secs(30),
+             link.installed_app_ids(),
+-        )
+-        .await
+-        {
+-            Ok(apps) => {
+-                say(&format!(
+-                    "Detected {} installed user apps on the iPhone.",
+-                    apps.len()
+-                ));
+-                Some(apps)
+-            }
+-            Err(err) => {
+-                fallback_renew_all = true;
+-                say(&format!("WARNING: installed-app lookup failed: {err}"));
+-                say("FALLBACK: renewing ALL known profiles for this Apple team, regardless of expiry.");
+-                None
+-            }
+-        }
++        ).await)?;
++        say(&format!("Detected {} installed user apps on the iPhone.", apps.len()));
++        Some(apps)
+     } else {
+         None
+     };
+@@ -449,7 +439,7 @@ async fn cmd_renew(
+         }
+         let days = p.days_left().unwrap_or(-1);
+         let group_left = *group_days.get(root).unwrap_or(&days);
+-        if !force && !fallback_renew_all && group_left > min_days {
++        if !force && group_left > min_days {
+             say(&format!(
+                 "   {bundle}: expires in {days} days, no renewal needed"
+             ));
+@@ -1125,7 +1115,28 @@ async fn run() -> Result<(), String> {
+ 
+ #[cfg(test)]
+ mod cli_tests {
+-    use super::save_password_confirmed;
++    use super::{require_installed_apps, save_password_confirmed};
++
++    #[test]
++    fn failed_inventory_never_authorizes_renewal() {
++        let error = require_installed_apps(Err("phone locked".into())).unwrap_err();
++        assert!(error.contains("no profiles were renewed"));
++    }
++
++    #[test]
++    fn empty_inventory_does_not_fall_back_to_known_profiles() {
++        let apps = require_installed_apps(Ok(Default::default())).unwrap();
++        assert!(apps.is_empty());
++    }
++
++    #[test]
++    fn inventory_retains_newly_installed_apps() {
++        let expected = ["com.example.first", "com.example.second", "com.example.third"]
++            .into_iter().map(str::to_string).collect();
++        let apps = require_installed_apps(Ok(expected)).unwrap();
++        assert_eq!(apps.len(), 3);
++        assert!(apps.contains("com.example.third"));
++    }
+ 
+     #[test]
+     fn missing_due_app_ids_cannot_report_success() {
