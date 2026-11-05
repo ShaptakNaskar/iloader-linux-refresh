@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renew selected iOS profiles using iLoader's Secret Service keyring login."""
+"""Discover installed iOS apps and renew their profiles using iLoader's saved login."""
 
 import argparse
 from contextlib import contextmanager
@@ -33,12 +33,27 @@ def write_private(path, contents):
         output.write(contents)
 
 
-def validate_bundles(bundles):
-    if not isinstance(bundles, list) or not bundles or any(
-        not isinstance(bundle, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]*", bundle)
+def discover_bundles(work, executable, team, timeout):
+    result = subprocess.run(
+        [str(executable), "inventory"], cwd=work,
+        env=dict(os.environ, ALTKEEPER_LANG="en"),
+        capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"App discovery failed: {detail or 'no device inventory available'}")
+    records = [line.removeprefix("ILR_INVENTORY ") for line in result.stdout.splitlines() if line.startswith("ILR_INVENTORY ")]
+    if len(records) != 1:
+        raise RuntimeError("App discovery returned no unique inventory record; reinstall the integration build.")
+    record = json.loads(records[0])
+    if not isinstance(record, dict) or record.get("version") != 1 or record.get("team_id") != team:
+        raise RuntimeError("App inventory does not match the configured Apple team.")
+    bundles = record.get("bundles")
+    if not isinstance(bundles, list) or any(
+        not isinstance(bundle, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", bundle)
         for bundle in bundles
     ):
-        raise RuntimeError("Choose the host app bundle IDs with install.py before enabling refresh.")
+        raise RuntimeError("App inventory contains invalid bundle IDs.")
     return list(dict.fromkeys(bundles))
 
 
@@ -64,15 +79,15 @@ def refresh(data, runtime, executable, dry_run=False):
 
         profile = json.loads((data / "account-profile.json").read_text())
         account = {key: profile[key] for key in ("apple_id", "team_id")}
-        bundles = validate_bundles(profile.get("bundles"))
         with private_workdir(data, runtime) as work:
             account["password"] = lookup_secret(account["apple_id"])
             write_private(work / "account.json", json.dumps(account).encode())
 
             deadline = time.monotonic() + 240
+            bundles = discover_bundles(work, executable, account["team_id"], 240)
+            print(f"Discovered {len(bundles)} installed app(s) for the configured signing team.", flush=True)
             status = 0
             for bundle in bundles:
-                # Explicit bundles avoid v0.5.5's inventory-failure fallback, which ignores expiry.
                 # Days are rounded down: zero means less than 24 hours remain (~day six).
                 command = [str(executable), "renew", "--bundle", bundle, "--min-days", "7" if dry_run else "0"]
                 if dry_run:
@@ -98,7 +113,7 @@ def main():
             Path.home() / ".local/share/altserver-refresh",
             Path(os.environ["RUNTIME_DIRECTORY"]) if os.environ.get("RUNTIME_DIRECTORY")
             else Path(os.environ["XDG_RUNTIME_DIR"]) / "altserver-refresh-manual",
-            Path.home() / ".local/bin/altkeeper",
+            Path.home() / ".local/bin/altkeeper-ilr",
             args.dry_run,
         )
     except (OSError, KeyError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:

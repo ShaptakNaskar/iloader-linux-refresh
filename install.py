@@ -25,9 +25,9 @@ spec = importlib.util.spec_from_file_location("refresh_apps", ROOT / "refresh-ap
 refresh_apps = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(refresh_apps)
 
-VERSION = "0.5.5"
-ARCHIVE = f"AltKeeper-v{VERSION}-Linux-x64.tar.gz"
-SHA256 = "1b0f6d8f79a1bf5ba0793a67b7e385870672405c81eac1d646d041d7c4ab6d0a"
+VERSION = "0.5.6-ilr.1"
+ARCHIVE = f"altkeeper-{VERSION}-linux-x86_64.tar.gz"
+SHA256 = "ef5b57fb9045095340d2fb06a4a9f78f2cbf036a4f68f7b96098b5f5da8a148c"
 
 
 def install_altkeeper(binary):
@@ -37,8 +37,8 @@ def install_altkeeper(binary):
             raise RuntimeError(f"{binary} is not AltKeeper {VERSION}; move it aside before installing.")
         return
     binary.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://github.com/BartolomeoRusso9/altkeeper/releases/download/v{VERSION}/{ARCHIVE}"
-    print(f"Downloading AltKeeper {VERSION} from its upstream GitHub release...", flush=True)
+    url = f"https://github.com/ShaptakNaskar/iloader-linux-refresh/releases/download/altkeeper-v{VERSION}/{ARCHIVE}"
+    print(f"Downloading the verified AltKeeper {VERSION} integration build...", flush=True)
     with tempfile.TemporaryDirectory(dir=binary.parent) as directory:
         archive = Path(directory) / ARCHIVE
         digest = hashlib.sha256()
@@ -50,7 +50,7 @@ def install_altkeeper(binary):
             raise RuntimeError("AltKeeper archive checksum mismatch; nothing was installed.")
         staged = Path(directory) / "altkeeper"
         with tarfile.open(archive, "r:gz") as bundle:
-            member = bundle.getmember(f"AltKeeper-v{VERSION}-Linux-x64/AltKeeper")
+            member = bundle.getmember(f"altkeeper-{VERSION}-linux-x86_64/altkeeper-ilr")
             if not member.isfile():
                 raise RuntimeError("The AltKeeper archive does not contain a regular executable.")
             with bundle.extractfile(member) as source, staged.open("wb") as output:
@@ -99,13 +99,8 @@ def configure(data, runtime, binary, iloader):
     profile_path = data / "account-profile.json"
     if profile_path.exists():
         existing = json.loads(profile_path.read_text())
-        profile = {key: existing[key] for key in ("apple_id", "team_id")}
-        bundles = existing.get("bundles")
-        if not bundles:
-            bundles = input(
-                "Host app bundle IDs to refresh (space separated; copy from iLoader > App IDs): "
-            ).split()
-        profile["bundles"] = refresh_apps.validate_bundles(bundles)
+        profile = dict(existing)
+        profile.pop("password", None)
         if profile != existing:
             refresh_apps.write_private(profile_path, json.dumps(profile).encode())
         profile_path.chmod(0o600)
@@ -137,10 +132,7 @@ def configure(data, runtime, binary, iloader):
         team = account.get("team_id")
         if not isinstance(team, str) or len(team) != 10 or not team.isascii() or not team.isalnum():
             raise RuntimeError("AltKeeper did not return a valid Apple developer team ID.")
-        bundles = refresh_apps.validate_bundles(input(
-            "Host app bundle IDs to refresh (space separated; copy from iLoader > App IDs): "
-        ).split())
-        refresh_apps.write_private(profile_path, json.dumps({"apple_id": email, "team_id": team, "bundles": bundles}).encode())
+        refresh_apps.write_private(profile_path, json.dumps({"apple_id": email, "team_id": team}).encode())
 
 
 def install():
@@ -157,7 +149,7 @@ def install():
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
     data.chmod(0o700)
     runtime = Path(os.environ["XDG_RUNTIME_DIR"]) / "altserver-refresh-setup"
-    binary = home / ".local/bin/altkeeper"
+    binary = home / ".local/bin/altkeeper-ilr"
     install_altkeeper(binary)
     with (data / "refresh.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

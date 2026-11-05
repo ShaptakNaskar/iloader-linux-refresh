@@ -39,7 +39,7 @@ class InstallerTest(unittest.TestCase):
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode="w:gz") as bundle:
             for name, content in [
-                (f"AltKeeper-v{installer.VERSION}-Linux-x64/AltKeeper", b"test executable"),
+                (f"altkeeper-{installer.VERSION}-linux-x86_64/altkeeper-ilr", b"test executable"),
                 ("../../escape", b"must not extract"),
             ]:
                 member = tarfile.TarInfo(name)
@@ -86,13 +86,13 @@ class InstallerTest(unittest.TestCase):
 
         with patch.object(installer.refresh_apps, "lookup_secret", side_effect=lookup):
             with patch.object(installer.subprocess, "run", side_effect=login):
-                with patch("builtins.input", return_value="com.example.app"):
+                with patch("builtins.input", side_effect=AssertionError("Setup must not ask for app bundle IDs")):
                     installer.configure(self.data, self.runtime, self.binary, self.iloader)
 
     def test_setup_imports_pairing_but_never_persists_the_password(self):
         self.configure()
         profile = json.loads((self.data / "account-profile.json").read_text())
-        self.assertEqual(profile, {"apple_id": "test@example.invalid", "team_id": "TEAM123456", "bundles": ["com.example.app"]})
+        self.assertEqual(profile, {"apple_id": "test@example.invalid", "team_id": "TEAM123456"})
         self.assertEqual(stat.S_IMODE((self.data / "account-profile.json").stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.data / "rp-pairing.plist").stat().st_mode), 0o600)
         self.assertEqual(list(self.runtime.iterdir()), [])
@@ -110,13 +110,13 @@ class InstallerTest(unittest.TestCase):
     def test_existing_configuration_is_reused_and_old_password_fields_are_removed(self):
         profile = {"apple_id": "test@example.invalid", "team_id": "TEAM123456", "password": "legacy-password"}
         (self.data / "account-profile.json").write_text(json.dumps(profile))
-        with patch("builtins.input", return_value="com.example.app"):
+        with patch("builtins.input", side_effect=AssertionError("Setup must not ask for app bundle IDs")):
             with patch.object(installer.refresh_apps, "lookup_secret") as lookup:
                 installer.configure(self.data, self.runtime, self.binary, self.iloader)
         lookup.assert_not_called()
         saved = json.loads((self.data / "account-profile.json").read_text())
         self.assertNotIn("password", saved)
-        self.assertEqual(saved["bundles"], ["com.example.app"])
+        self.assertNotIn("bundles", saved)
 
     def test_credential_bearing_anisette_url_is_rejected(self):
         (self.iloader / "preferences.json").write_text(json.dumps({"anisetteServer3-1": "https://user:password@example.invalid"}))

@@ -1,5 +1,5 @@
 [Unit]
-Description=Renew selected iPhone app profiles before their seven-day expiry
+Description=Discover and renew installed iPhone apps before their seven-day expiry
 ConditionPathExists=%h/.local/share/altserver-refresh/account-profile.json
 ConditionPathExists=%h/.local/share/altserver-refresh/rp-pairing.plist
 
