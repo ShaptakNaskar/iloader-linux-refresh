@@ -63,6 +63,8 @@ journalctl --user -u altserver-refresh.service -n 30
 systemctl --user disable --now altserver-refresh.timer
 ```
 
+On Fish, setup also installs a `refresh-apps` function. Run `refresh-apps` to renew all discovered apps immediately, even if they have days remaining. Use `refresh-apps --dry-run` to preview that action. Other shells can use `~/.local/bin/refresh-apps --force`. Scheduled runs keep their normal expiry threshold.
+
 To add an app, sign and install it successfully through iLoader using the configured account. It will appear in the next hourly inventory check. Uninstalling an app removes it from the discovered set, even if an old provisioning profile remains. Apps belonging to other signing teams are excluded.
 
 ## Credential handling
@@ -70,6 +72,7 @@ To add an app, sign and install it successfully through iLoader using the config
 - The Apple password stays in iLoader's Secret Service entry. It is not placed in command arguments, unit files, or persistent account metadata.
 - Each run creates a private directory under the user runtime directory and a mode-600 `account.json` for AltKeeper. Normal completion, errors, and subprocess timeouts remove it. The systemd service also removes its runtime directory when it stops.
 - Persistent metadata, Anisette state, and pairing keys live in `~/.local/share/altserver-refresh/`, restricted to your user. These are sensitive: **do not upload or share this directory**.
+- When an imported pairing record can be matched to iLoader's cache, setup/refresh remembers that keyring entry and uses its current pairing key on each run. Re-pairing through iLoader therefore does not leave the job using an old copied key. The original pairing file is preserved as a fallback; keys read from the keyring are used only in the private runtime directory.
 - A lock prevents overlapping runs. Discovery and all refresh attempts share a four-minute subprocess budget. Each discovered app gets a separate attempt, so one app's failure does not starve the others; the batch still reports failure to the journal.
 - If the installed-app inventory cannot be read, the run stops before Apple sign-in or renewal. It never guesses from old profiles or app lists.
 - The installer downloads only the pinned integration build. AltKeeper and iLoader retain their own licenses and security properties.
@@ -87,7 +90,7 @@ Important limits:
 - AltKeeper is experimental and uses private Apple APIs. This project cannot guarantee compatibility with future Apple changes.
 - This first release supports one phone/account configuration and standard iLoader data paths. ARM Linux, Flatpak installations, and custom XDG data locations are not supported.
 
-The `-ilr.1` build is required for automatic discovery. The wrapper reads its structured inventory and refreshes each discovered host with `--bundle`, never `--force`. Unmodified AltKeeper 0.5.6 also has an inventory-failure fallback that can bypass expiry checks; the integration build removes that fallback. It is installed separately as `~/.local/bin/altkeeper-ilr`.
+The `-ilr.1` build is required for automatic discovery. The wrapper reads its structured inventory and refreshes each discovered host with `--bundle`. Only an explicit manual `--force` request bypasses expiry; it still requires a successful inventory and matching signing team. Unmodified AltKeeper 0.5.6 also has an inventory-failure fallback that can bypass expiry checks; the integration build removes that fallback. It is installed separately as `~/.local/bin/altkeeper-ilr`.
 
 ## Development
 

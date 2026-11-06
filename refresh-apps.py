@@ -2,11 +2,13 @@
 """Discover installed iOS apps and renew their profiles using iLoader's saved login."""
 
 import argparse
+import base64
 from contextlib import contextmanager
 import fcntl
 import json
 import os
 from pathlib import Path
+import plistlib
 import re
 import stat
 import subprocess
@@ -27,10 +29,46 @@ def lookup_secret(username):
 
 
 def write_private(path, contents):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as output:
-        os.fchmod(output.fileno(), 0o600)
-        output.write(contents)
+    if path.is_symlink():
+        raise OSError("Refusing to overwrite a private-file symlink.")
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(contents)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_pairing(data, work, profile, iloader):
+    entry = profile.get("pairing_entry")
+    if not entry and iloader is not None:
+        saved = (data / "rp-pairing.plist").read_bytes()
+        matches = [path.name for path in iloader.glob("rppairing1.1_file_*") if path.read_bytes() == saved]
+        if len(matches) == 1:
+            entry = matches[0]
+    if not entry:
+        return
+    if not isinstance(entry, str) or not re.fullmatch(r"rppairing1\.1_file_[A-Za-z0-9-]+", entry):
+        raise RuntimeError("Invalid iLoader pairing entry in account metadata.")
+    if profile.get("pairing_entry") != entry:
+        profile["pairing_entry"] = entry
+        write_private(data / "account-profile.json", json.dumps(profile).encode())
+    result = subprocess.run(
+        ["secret-tool", "lookup", "service", "iloader", "username", entry],
+        capture_output=True, text=True, timeout=10,
+    )
+    if result.returncode or not result.stdout:
+        return  # Filesystem-only pairings can have no corresponding keyring entry.
+    pairing = base64.b64decode(result.stdout.removesuffix("\n"), validate=True)
+    record = plistlib.loads(pairing)
+    if not isinstance(record, dict) or not {"public_key", "private_key", "identifier"}.issubset(record):
+        raise RuntimeError("iLoader's saved remote pairing record is invalid.")
+    destination = work / "rp-pairing.plist"
+    if destination.is_symlink():
+        destination.unlink()
+    write_private(destination, pairing)
 
 
 def discover_bundles(work, executable, team, timeout):
@@ -70,7 +108,7 @@ def private_workdir(data, runtime):
         yield work
 
 
-def refresh(data, runtime, executable, dry_run=False):
+def refresh(data, runtime, executable, dry_run=False, force=False, iloader=None):
     with (data / "refresh.lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -81,6 +119,7 @@ def refresh(data, runtime, executable, dry_run=False):
         account = {key: profile[key] for key in ("apple_id", "team_id")}
         with private_workdir(data, runtime) as work:
             account["password"] = lookup_secret(account["apple_id"])
+            prepare_pairing(data, work, profile, iloader)
             write_private(work / "account.json", json.dumps(account).encode())
 
             deadline = time.monotonic() + 240
@@ -92,6 +131,8 @@ def refresh(data, runtime, executable, dry_run=False):
                 command = [str(executable), "renew", "--bundle", bundle, "--min-days", "7" if dry_run else "0"]
                 if dry_run:
                     command.append("--dry-run")
+                if force:
+                    command.append("--force")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(command, 240)
@@ -106,6 +147,7 @@ def refresh(data, runtime, executable, dry_run=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Check Apple login and due apps without renewing profiles.")
+    parser.add_argument("--force", action="store_true", help="Renew all discovered apps regardless of remaining days.")
     args = parser.parse_args()
     os.umask(0o077)
     try:
@@ -115,6 +157,8 @@ def main():
             else Path(os.environ["XDG_RUNTIME_DIR"]) / "altserver-refresh-manual",
             Path.home() / ".local/bin/altkeeper-ilr",
             args.dry_run,
+            args.force,
+            Path.home() / ".local/share/me.nabdev.iloader",
         )
     except (OSError, KeyError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"Refresh failed: {error}", file=sys.stderr)

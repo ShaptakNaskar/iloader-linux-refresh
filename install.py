@@ -109,12 +109,14 @@ def configure(data, runtime, binary, iloader):
     if not isinstance(stored, list) or any(not isinstance(item, str) or not item.strip() or item.startswith("-") for item in stored):
         raise RuntimeError("iLoader's saved account list has an unsupported format.")
     email = choose(stored, "saved Apple account")
+    pairing_entry = None
     refresh_apps.lookup_secret(email)
     import_anisette(data, iloader)
     if not (data / "rp-pairing.plist").exists():
         pairing_files = sorted(iloader.glob("rppairing1.1_file_*"))
         if pairing_files:
             selected = choose(pairing_files, "remote pairing file")
+            pairing_entry = selected.name
             pairing = selected.read_bytes()
             record = plistlib.loads(pairing)
             if not isinstance(record, dict) or not {"public_key", "private_key", "identifier"}.issubset(record):
@@ -132,7 +134,10 @@ def configure(data, runtime, binary, iloader):
         team = account.get("team_id")
         if not isinstance(team, str) or len(team) != 10 or not team.isascii() or not team.isalnum():
             raise RuntimeError("AltKeeper did not return a valid Apple developer team ID.")
-        refresh_apps.write_private(profile_path, json.dumps({"apple_id": email, "team_id": team}).encode())
+        profile = {"apple_id": email, "team_id": team}
+        if pairing_entry:
+            profile["pairing_entry"] = pairing_entry
+        refresh_apps.write_private(profile_path, json.dumps(profile).encode())
 
 
 def install():
@@ -155,10 +160,14 @@ def install():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         configure(data, runtime, binary, home / ".local/share/me.nabdev.iloader")
     print("Checking Apple sign-in and installed profiles without renewing them...", flush=True)
-    if refresh_apps.refresh(data, runtime, binary, dry_run=True):
+    if refresh_apps.refresh(data, runtime, binary, dry_run=True, iloader=home / ".local/share/me.nabdev.iloader"):
         raise RuntimeError("The dry run failed. The timer was not enabled; check the error above.")
     shutil.copyfile(ROOT / "refresh-apps.py", home / ".local/bin/refresh-apps")
     (home / ".local/bin/refresh-apps").chmod(0o755)
+    if shutil.which("fish"):
+        functions = home / ".config/fish/functions"
+        functions.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / "fish/refresh-apps.fish", functions / "refresh-apps.fish")
     units = home / ".config/systemd/user"
     units.mkdir(parents=True, exist_ok=True)
     for name in ("altserver-refresh.service", "altserver-refresh.timer"):

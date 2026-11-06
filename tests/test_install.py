@@ -92,7 +92,7 @@ class InstallerTest(unittest.TestCase):
     def test_setup_imports_pairing_but_never_persists_the_password(self):
         self.configure()
         profile = json.loads((self.data / "account-profile.json").read_text())
-        self.assertEqual(profile, {"apple_id": "test@example.invalid", "team_id": "TEAM123456"})
+        self.assertEqual(profile, {"apple_id": "test@example.invalid", "team_id": "TEAM123456", "pairing_entry": "rppairing1.1_file_TEST"})
         self.assertEqual(stat.S_IMODE((self.data / "account-profile.json").stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE((self.data / "rp-pairing.plist").stat().st_mode), 0o600)
         self.assertEqual(list(self.runtime.iterdir()), [])

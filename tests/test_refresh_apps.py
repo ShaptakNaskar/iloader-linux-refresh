@@ -1,7 +1,9 @@
 import importlib.util
+import base64
 import json
 import os
 from pathlib import Path
+import plistlib
 import stat
 import subprocess
 import tempfile
@@ -33,7 +35,7 @@ class RefreshAppsTest(unittest.TestCase):
         record = {"version": 1, "team_id": self.profile["team_id"], "bundles": self.discovered if bundles is None else bundles}
         return subprocess.CompletedProcess([], 0, "Device library message\nILR_INVENTORY " + json.dumps(record) + "\n", "")
 
-    def check_run(self, *, dry_run=False, status=0):
+    def check_run(self, *, dry_run=False, force=False, status=0):
         refreshed = []
 
         def run(command, **kwargs):
@@ -48,12 +50,12 @@ class RefreshAppsTest(unittest.TestCase):
             if command == [str(self.executable), "inventory"]:
                 return self.inventory()
             bundle = command[3]
-            self.assertEqual(command, [str(self.executable), "renew", "--bundle", bundle, "--min-days", "7" if dry_run else "0"] + (["--dry-run"] if dry_run else []))
+            self.assertEqual(command, [str(self.executable), "renew", "--bundle", bundle, "--min-days", "7" if dry_run else "0"] + (["--dry-run"] if dry_run else []) + (["--force"] if force else []))
             refreshed.append(bundle)
             return subprocess.CompletedProcess(command, status)
 
         with patch.object(refresh_apps.subprocess, "run", side_effect=run):
-            result = refresh_apps.refresh(self.data, self.runtime, self.executable, dry_run)
+            result = refresh_apps.refresh(self.data, self.runtime, self.executable, dry_run, force)
         self.assertEqual(result, status)
         self.assertEqual(refreshed, self.discovered)
         self.assertEqual(list(self.runtime.iterdir()), [])
@@ -66,13 +68,20 @@ class RefreshAppsTest(unittest.TestCase):
     def test_dry_run_checks_installed_profiles_without_installing(self):
         self.check_run(dry_run=True)
 
+    def test_manual_force_renews_only_discovered_apps(self):
+        self.discovered = ["com.example.first", "com.example.second"]
+        self.check_run(force=True)
+
+    def test_forced_dry_run_remains_read_only(self):
+        self.check_run(dry_run=True, force=True)
+
     def test_credentials_are_removed_and_failure_is_reported(self):
         self.check_run(status=9)
 
     def test_missing_keyring_password_does_not_start_renewal(self):
         with patch.object(refresh_apps.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")) as run:
             with self.assertRaisesRegex(RuntimeError, "Unlock.*keyring"):
-                refresh_apps.refresh(self.data, self.runtime, self.executable)
+                refresh_apps.refresh(self.data, self.runtime, self.executable, force=True)
         self.assertEqual(run.call_count, 1)
         self.assertEqual(list(self.runtime.iterdir()), [])
 
@@ -113,7 +122,7 @@ class RefreshAppsTest(unittest.TestCase):
             subprocess.CompletedProcess([], 9, "", "phone locked"),
         ]) as run:
             with self.assertRaisesRegex(RuntimeError, "App discovery failed: phone locked"):
-                refresh_apps.refresh(self.data, self.runtime, self.executable)
+                refresh_apps.refresh(self.data, self.runtime, self.executable, force=True)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(run.call_args.args[0], [str(self.executable), "inventory"])
         self.assertEqual(list(self.runtime.iterdir()), [])
@@ -156,6 +165,53 @@ class RefreshAppsTest(unittest.TestCase):
                         refresh_apps.refresh(self.data, self.runtime, self.executable)
                 self.assertEqual(run.call_count, 2)
                 self.assertEqual(list(self.runtime.iterdir()), [])
+
+    def test_current_keyring_pairing_replaces_stale_runtime_copy_without_destroying_backup(self):
+        iloader = self.data.parent / "iloader"
+        iloader.mkdir()
+        entry = "rppairing1.1_file_TEST-DEVICE"
+        original = (self.data / "rp-pairing.plist").read_bytes()
+        (iloader / entry).write_bytes(original)
+        updated = plistlib.dumps({"public_key": b"public", "private_key": b"private", "identifier": "new-pairing"})
+        with refresh_apps.private_workdir(self.data, self.runtime) as work:
+            with patch.object(refresh_apps.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, base64.b64encode(updated).decode() + "\n", "")):
+                refresh_apps.prepare_pairing(self.data, work, self.profile, iloader)
+            self.assertEqual((work / "rp-pairing.plist").read_bytes(), updated)
+            self.assertFalse((work / "rp-pairing.plist").is_symlink())
+            self.assertEqual(stat.S_IMODE((work / "rp-pairing.plist").stat().st_mode), 0o600)
+        self.assertEqual((self.data / "rp-pairing.plist").read_bytes(), original)
+        self.assertEqual(json.loads((self.data / "account-profile.json").read_text())["pairing_entry"], entry)
+        self.assertEqual(list(self.runtime.iterdir()), [])
+
+    def test_pairing_key_cannot_be_guessed_when_multiple_cached_devices_match(self):
+        iloader = self.data.parent / "iloader"
+        iloader.mkdir()
+        for entry in ["rppairing1.1_file_FIRST", "rppairing1.1_file_SECOND"]:
+            (iloader / entry).write_bytes((self.data / "rp-pairing.plist").read_bytes())
+        with refresh_apps.private_workdir(self.data, self.runtime) as work:
+            with patch.object(refresh_apps.subprocess, "run") as run:
+                refresh_apps.prepare_pairing(self.data, work, self.profile, iloader)
+            run.assert_not_called()
+            self.assertTrue((work / "rp-pairing.plist").is_symlink())
+
+    def test_malformed_keyring_pairing_is_rejected_and_backup_kept(self):
+        self.profile["pairing_entry"] = "rppairing1.1_file_TEST-DEVICE"
+        with refresh_apps.private_workdir(self.data, self.runtime) as work:
+            invalid = base64.b64encode(plistlib.dumps({"unexpected": "record"})).decode() + "\n"
+            with patch.object(refresh_apps.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, invalid, "")):
+                with self.assertRaisesRegex(RuntimeError, "record is invalid"):
+                    refresh_apps.prepare_pairing(self.data, work, self.profile, None)
+            self.assertTrue((work / "rp-pairing.plist").is_symlink())
+
+    def test_private_metadata_write_preserves_previous_file_on_replace_failure(self):
+        path = self.data / "account-profile.json"
+        original = path.read_bytes()
+        files_before = set(self.data.iterdir())
+        with patch.object(refresh_apps.os, "replace", side_effect=OSError("replace failed")):
+            with self.assertRaises(OSError):
+                refresh_apps.write_private(path, b"replacement")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(set(self.data.iterdir()), files_before)
 
 
 if __name__ == "__main__":
